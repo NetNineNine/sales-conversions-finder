@@ -1,0 +1,6 @@
+flask
+pandas
+python-dotenv
+mysql-connector-python
+openpyxl
+Flask-SocketIO
