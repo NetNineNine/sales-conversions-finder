@@ -46,15 +46,15 @@
 </head>
 <body>
     <div class="container">
-        <h1>Please be patient and continue with other work. This might take a few minutes...</h1>
+        <h1 id="heading">Processing...</h1>
         <progress id="progress-bar" value="0" max="100"></progress>
         <p id="progress-text">Processing: 0%</p>
-        <p id="status-message"></p>
-        <a id="home-button" href="/" class="btn btn-primary">Back to Home</a>
+        <a id="download-button" href="/download" class="btn btn-primary">Download</a>
+        <a id="home-button" href="/" class="btn btn-primary">Back</a>
     </div>
     <script>
         document.addEventListener("DOMContentLoaded", () => {
-            var socket = io.connect('http://' + document.domain + ':' + location.port);
+            var socket = io.connect(location.protocol + '//' + document.domain + ':' + location.port);
 
             socket.on('update_progress', function(data) {
                 console.log("Received update_progress event", data); // Debug statement
@@ -62,23 +62,29 @@
                 let progressBar = document.getElementById('progress-bar');
                 let progressText = document.getElementById('progress-text');
                 let statusMessage = document.getElementById('status-message');
+                let downloadButton = document.getElementById('download-button');
+                let heading = document.getElementById('heading');
 
                 progressBar.value = data.progress;
 
                 if (data.progress === 100) {
-                    progressText.innerText = "Completed";
-                    progressText.style.display = 'block'; // Show progress text
-                    statusMessage.innerText = data.status_message || ''; // Show status message
-                    statusMessage.style.display = 'block'; // Show status message
+                    heading.innerText = "Done!";
+                    progressText.style.display = 'none'; // Show progress text
+                    progressBar.style.display = 'none'; // Hide progress bar
+                    downloadButton.style.display = 'block'; // Show download button
+                    downloadButton.href = location.protocol + '//' + document.domain + ':' + location.port + '/download/' + data.filename || '/'; // Set home button URL
+                    downloadButton.innerText = 'Download ' + data.filename; // Set home button text
                     document.getElementById('home-button').style.display = 'block'; // Show home button
                 } else if (data.progress === -1) {
-                    progressText.innerText = data.error_message || "Error";
+                    progressText.innerText = data.error_message || "Error!";
                     progressText.style.display = 'block'; // Show progress text
                     statusMessage.style.display = 'none'; // Hide status message
+                    downloadButton.style.display = 'none'; // Hide download button
                     document.getElementById('home-button').style.display = 'none'; // Hide home button
                 } else {
-                    progressText.innerText = `Processing: ${data.progress.toFixed(2)}%`;
+                    progressText.innerText = `${data.progress.toFixed(2)}%`;
                     progressText.style.display = 'block'; // Show progress text
+                    downloadButton.style.display = 'none'; // Hide download button
                 }
             });
         });

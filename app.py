@@ -5,21 +5,24 @@ from flask import (
     redirect,
     url_for,
     render_template,
-    # jsonify,
     send_from_directory,
 )
 import pandas as pd
 import mysql.connector
 import os
 import threading
+import re
+import datetime
+import random
+import string
 
-# import json
 from flask_socketio import SocketIO
 from dotenv import load_dotenv
 
+
 app = Flask(__name__)
 socketio = SocketIO(app)
-
+files_dir=""
 
 @app.route("/")
 def index():
@@ -37,21 +40,10 @@ def upload_file():
 
     if file:
         df = pd.read_excel(file)
-        column_to_use = request.form["column"]
-
-        if column_to_use not in df.columns:
-            socketio.emit(
-                "update_progress",
-                {
-                    "progress": -1,
-                    "error_message": f'Column "{column_to_use}" not found in the uploaded file.',
-                },
-            )
-            return redirect(url_for("progress"))
 
         connection = create_db_connection()
         threading.Thread(
-            target=process_file, args=(df, column_to_use, connection)
+            target=process_file, args=(df, connection)
         ).start()
 
         return redirect(url_for("progress"))
@@ -64,113 +56,90 @@ def progress():
 
 @app.route("/download/<filename>")
 def download_file(filename):
-    download_folder = os.path.expanduser("~/Downloads")
+    download_folder = os.path.expanduser(files_dir)
     return send_from_directory(download_folder, filename, as_attachment=True)
 
 
 def create_db_connection():
+    load_dotenv()
     return mysql.connector.connect(
-        host=os.getenv("DB_HOST"),
+        host=str(os.getenv("DB_HOST")),
         user=os.getenv("DB_USER"),
         password=os.getenv("DB_PASSWORD"),
         database=os.getenv("DB_SCHEMA"),
     )
 
+def convert_status_id_to_service_status(status_id):
+    print (status_id)
+    status_map = {
+        1: 'Expression of Interest',
+        2: 'Active',
+        3: 'Pending ISP Application',
+        4: 'Pending Installation',
+        5: 'Pending ISP Activation',
+        6: 'Activation in Progress',
+        7: 'Expiring',
+        8: 'Expired',
+        9: 'Cancellation in Progress',
+        10: 'Cancelled',
+        11: 'ISP Changed',
+        12: 'ISP Change Pending',
+        13: 'Product Changed',
+        14: 'Product Change Pending',
+        15: 'Rejected',
+        16: 'Suspended'
+    }
 
-def fetch_status_wo_url(last_36, connection):
+    return status_map.get(status_id, 'Unknown')
+
+def get_scalar_result(query, connection):
     cursor = connection.cursor()
-    query = "SELECT status FROM work_orders WHERE guid = %s"
-    cursor.execute(query, (last_36,))
+    cursor.execute(query)
     result = cursor.fetchone()
     cursor.close()
     return result[0] if result else "Not Found"
 
+def get_work_order_status(uuid, connection):
+    query = f"SELECT status FROM work_orders WHERE guid = '{uuid}' LIMIT 1"
+    return get_scalar_result(query, connection)
 
-def fetch_service_status(last_36, connection):
-    cursor = connection.cursor()
-    query = """
-    SELECT
-        CASE status_id
-            WHEN 1 THEN 'Expression of Interest'
-            WHEN 2 THEN 'Active'
-            WHEN 3 THEN 'Pending ISP Application'
-            WHEN 4 THEN 'Pending Installation'
-            WHEN 5 THEN 'Pending ISP Activation'
-            WHEN 6 THEN 'Activation in Progress'
-            WHEN 7 THEN 'Expiring'
-            WHEN 8 THEN 'Expired'
-            WHEN 9 THEN 'Cancellation in Progress'
-            WHEN 10 THEN 'Cancelled'
-            WHEN 11 THEN 'ISP Changed'
-            WHEN 12 THEN 'ISP Change Pending'
-            WHEN 13 THEN 'Product Changed'
-            WHEN 14 THEN 'Product Change Pending'
-            WHEN 15 THEN 'Rejected'
-            WHEN 16 THEN 'Suspended'
-            ELSE 'Unknown'
-        END AS status_name
-    FROM services
-    WHERE aex_id = %s
-    """
-    cursor.execute(query, (last_36,))
-    result = cursor.fetchone()
-    cursor.close()
-    return result[0] if result else "Not Found"
+def get_service_status(uuid, connection):
+    query = f"SELECT status_id FROM services WHERE aex_id = '{uuid}' LIMIT 1"
+    return get_scalar_result(query, connection)
 
+def extract_uuid_from_string(input_string):
+    # return "3D97D2AD-C18D-471B-9A29-E0003FFA64D2"
+    uuid_pattern = re.compile(r'\b[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\b', re.IGNORECASE)
+    matches = uuid_pattern.findall(input_string)
 
-def process_file(df, column_to_use, connection):
+    if matches:
+        return matches[-1]
+    else:
+        return None
+
+def process_file(df, connection):
     total_rows = len(df)
-    chunk_size = max(total_rows // 100, 1)
-    completed_rows = 0
-
-    status_counts = {}
-    status_list = []
+    progress_report_frequency = 15
 
     try:
-        if column_to_use == "WO URL":
-            df["Last_36_Chars"] = df["WO URL"].apply(lambda url: url[-36:])
-        elif column_to_use == "Service URL":
-            df["Last_36_Chars"] = df["Service URL"].apply(
-                lambda service_id: service_id[-36:]
-            )
+        for row_number, row in df.iterrows():
+            uuid = extract_uuid_from_string(row["Service URL"])
+            df.at[row_number, "Service Status"] = convert_status_id_to_service_status(get_service_status(uuid, connection))
+            uuid = extract_uuid_from_string(row["WO URL"])
+            df.at[row_number, "Work Order Status"] = get_work_order_status(uuid, connection)
+            df.at[row_number, "Commission Due"] = "Yes" if df.at[row_number,"Service Status"] == "Active" and df.at[row_number,"Work Order Status"] == "Installation Complete" else "No"
+            if row_number % progress_report_frequency == 0:
+                percentage_complete = (row_number / total_rows) * 100
+                socketio.emit("update_progress", {"progress": percentage_complete})
 
-        for start in range(0, total_rows, chunk_size):
-            end = start + chunk_size
-            chunk = df.iloc[start:end].copy()
-
-            if column_to_use == "WO URL":
-                chunk["Status"] = chunk["Last_36_Chars"].apply(
-                    lambda last_36: fetch_status_wo_url(last_36, connection)
-                )
-            elif column_to_use == "Service URL":
-                chunk["Status"] = chunk["Last_36_Chars"].apply(
-                    lambda last_36: fetch_service_status(last_36, connection)
-                )
-
-            for status in chunk["Status"]:
-                if status in status_counts:
-                    status_counts[status] += 1
-                else:
-                    status_counts[status] = 1
-
-            status_list.append(chunk)
-            completed_rows += chunk_size
-
-            progress = (completed_rows / total_rows) * 100
-            socketio.emit("update_progress", {"progress": progress})
-
-        result_df = pd.concat(status_list, ignore_index=True)
-        output_filename = f'{column_to_use.lower().replace(" ", "_")}_status.xlsx'
-        download_folder = os.path.expanduser("~/Downloads")
-        output_excel_path = os.path.join(download_folder, output_filename)
-        result_df.to_excel(output_excel_path, index=False)
+        output_file = generate_filename()
+        df.to_excel(output_file, index=False)
 
         socketio.emit(
             "update_progress",
             {
                 "progress": 100,
-                "status_message": f"Status saved to {output_excel_path}",
-                "filename": output_filename,
+                "filename": output_file,
             },
         )
 
@@ -181,11 +150,14 @@ def process_file(df, column_to_use, connection):
     finally:
         connection.close()
 
+def generate_filename():
+    today_date = datetime.datetime.now().strftime("%Y-%m-%d")
+    unique_id = ''.join(random.choices(string.digits, k=8))
+    filename = f"{today_date}_{unique_id}.xlsx"
+    return filename
 
 if __name__ == "__main__":
     load_dotenv()
-
     app_port = os.getenv("APP_PORT")
-    debug_mode = os.getenv("DEBUG")
-
+    debug_mode = os.getenv("DEBUG") == "True"
     socketio.run(app, host="0.0.0.0", port=app_port, debug=debug_mode)
